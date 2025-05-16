@@ -1,0 +1,455 @@
+package github.umer0586.sensorserver.service
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraAccessException
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.media.ImageReader
+import android.os.Binder
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.IBinder
+import android.util.Log
+import android.view.Surface
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import github.umer0586.sensorserver.R
+import github.umer0586.sensorserver.activities.MainActivity
+import github.umer0586.sensorserver.broadcastreceiver.BroadcastMessageReceiver
+import github.umer0586.sensorserver.customextensions.getHotspotIp
+import github.umer0586.sensorserver.customextensions.getIp
+import github.umer0586.sensorserver.setting.AppSettings
+import github.umer0586.sensorserver.videostream.VideoServerInfo
+import github.umer0586.sensorserver.videostream.VideoWebSocketServer
+import java.net.InetSocketAddress
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+
+interface VideoServerStateListener {
+    fun onStart(videoServerInfo: VideoServerInfo)
+    fun onStop()
+    fun onError(exception: Exception?)
+    fun onRunning(videoServerInfo: VideoServerInfo)
+}
+
+class VideoStreamService : Service() {
+    
+    private var videoServerStateListener: VideoServerStateListener? = null
+    private var videoWebSocketServer: VideoWebSocketServer? = null
+    private lateinit var broadcastMessageReceiver: BroadcastMessageReceiver
+    private lateinit var appSettings: AppSettings
+    
+    // Camera related variables
+    private lateinit var cameraManager: CameraManager
+    private var cameraId: String = "0" // Default to first camera
+    private var cameraDevice: CameraDevice? = null
+    private var captureSession: CameraCaptureSession? = null
+    private lateinit var imageReader: ImageReader
+    private lateinit var backgroundThread: HandlerThread
+    private lateinit var backgroundHandler: Handler
+    private val cameraOpenCloseLock = Semaphore(1)
+    
+    companion object {
+        private val TAG: String = VideoStreamService::class.java.simpleName
+        const val CHANNEL_ID = "VideoStreamServiceChannel"
+        const val ON_GOING_NOTIFICATION_ID = 333
+        val ACTION_STOP_VIDEO_STREAM = "ACTION_STOP_VIDEO_STREAM_" + VideoStreamService::class.java.name
+        private const val DEFAULT_VIDEO_WIDTH = 640
+        private const val DEFAULT_VIDEO_HEIGHT = 480
+        private const val DEFAULT_PORT = 8086
+    }
+    
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "onCreate() - Initializing VideoStreamService")
+        
+        try {
+            // Initialize camera manager
+            cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            Log.d(TAG, "CameraManager initialized")
+            
+            // Initialize app settings
+            appSettings = AppSettings(this)
+            Log.d(TAG, "AppSettings initialized")
+            
+            // Create notification channel for Android 8.0+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                createNotificationChannel()
+                Log.d(TAG, "Notification channel created")
+            }
+            
+            // Register broadcast receiver for stopping the service
+            broadcastMessageReceiver = BroadcastMessageReceiver(object : BroadcastMessageReceiver.BroadcastListener {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    Log.d(TAG, "Received broadcast to stop video stream")
+                    stopSelf()
+                }
+            })
+            
+            val intentFilter = IntentFilter().apply {
+                addAction(ACTION_STOP_VIDEO_STREAM)
+            }
+            
+            registerReceiver(broadcastMessageReceiver, intentFilter)
+            Log.d(TAG, "BroadcastMessageReceiver registered")
+            
+            // Start background thread for camera operations
+            startBackgroundThread()
+            Log.d(TAG, "Background thread started")
+            
+            Log.d(TAG, "VideoStreamService created successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onCreate: ${e.message}", e)
+        }
+    }
+    
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand() - Starting VideoStreamService")
+        
+        try {
+            // Get IP address
+            val ipAddress = if (appSettings.isHotspotIpPreferred()) {
+                Log.d(TAG, "Using hotspot IP address")
+                getHotspotIp(this)
+            } else {
+                Log.d(TAG, "Using regular IP address")
+                getIp(this)
+            }
+            
+            Log.d(TAG, "IP address: $ipAddress")
+            
+            if (ipAddress.isNullOrEmpty()) {
+                Log.e(TAG, "Failed to get IP address")
+                videoServerStateListener?.onError(Exception("Failed to get IP address"))
+                stopForeground(true)
+                return START_NOT_STICKY
+            }
+            
+            // Get port from settings or use default
+            val port = appSettings.getVideoServerPort() ?: DEFAULT_PORT
+            Log.d(TAG, "Using port: $port")
+            
+            try {
+                // Initialize WebSocket server
+                Log.d(TAG, "Initializing VideoWebSocketServer")
+                videoWebSocketServer = VideoWebSocketServer(InetSocketAddress(ipAddress, port))
+                
+                // Set up callbacks
+                videoWebSocketServer?.onStart { serverInfo ->
+                    Log.d(TAG, "VideoWebSocketServer started successfully")
+                    videoServerStateListener?.onStart(serverInfo)
+                    
+                    // Start camera preview
+                    setupCamera()
+                    
+                    // Create notification
+                    val activityIntent = Intent(this, MainActivity::class.java)
+                    val broadcastIntent = Intent(ACTION_STOP_VIDEO_STREAM).apply {
+                        setPackage(packageName)
+                    }
+                    
+                    val pendingIntentActivity = PendingIntent.getActivity(this, 0, activityIntent, PendingIntent.FLAG_IMMUTABLE)
+                    val pendingIntentBroadcast = PendingIntent.getBroadcast(this, 0, broadcastIntent, PendingIntent.FLAG_IMMUTABLE)
+                    
+                    val notificationBuilder = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+                        .apply {
+                            setSmallIcon(R.drawable.ic_radar_signal)
+                            setContentTitle("Video Stream Running...")
+                            setContentText("ws://$ipAddress:$port")
+                            setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                            setContentIntent(pendingIntentActivity)
+                            addAction(android.R.drawable.ic_lock_power_off, "stop", pendingIntentBroadcast)
+                            setAutoCancel(false)
+                        }
+                    
+                    val notification = notificationBuilder.build()
+                    startForeground(ON_GOING_NOTIFICATION_ID, notification)
+                }
+                
+                videoWebSocketServer?.onStop {
+                    Log.d(TAG, "VideoWebSocketServer stopped")
+                    videoServerStateListener?.onStop()
+                    stopCamera()
+                    stopForeground(true)
+                }
+                
+                videoWebSocketServer?.onError { exception ->
+                    Log.e(TAG, "VideoWebSocketServer error: ${exception.message}", exception)
+                    videoServerStateListener?.onError(exception)
+                    stopCamera()
+                    stopForeground(true)
+                }
+                
+                // Start the WebSocket server
+                Log.d(TAG, "Starting VideoWebSocketServer")
+                videoWebSocketServer?.run()
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error setting up VideoWebSocketServer: ${e.message}", e)
+                videoServerStateListener?.onError(e)
+                stopForeground(true)
+                return START_NOT_STICKY
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onStartCommand: ${e.message}", e)
+            videoServerStateListener?.onError(e)
+            stopForeground(true)
+            return START_NOT_STICKY
+        }
+        
+        return START_NOT_STICKY
+    }
+    
+    override fun onBind(intent: Intent): IBinder {
+        Log.d(TAG, "onBind() called")
+        return LocalBinder()
+    }
+    
+    inner class LocalBinder : Binder() {
+        fun getService(): VideoStreamService = this@VideoStreamService
+    }
+    
+    fun setVideoServerStateListener(listener: VideoServerStateListener) {
+        this.videoServerStateListener = listener
+        Log.d(TAG, "VideoServerStateListener set")
+    }
+    
+    private fun setupCamera() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "Camera permission not granted")
+            videoServerStateListener?.onError(Exception("Camera permission not granted"))
+            return
+        }
+        
+        try {
+            Log.d(TAG, "Setting up camera...")
+            // Find the first back-facing camera
+            for (cameraId in cameraManager.cameraIdList) {
+                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    this.cameraId = cameraId
+                    Log.d(TAG, "Found back-facing camera: $cameraId")
+                    break
+                }
+            }
+            
+            // Create ImageReader for processing frames
+            Log.d(TAG, "Creating ImageReader with dimensions: ${DEFAULT_VIDEO_WIDTH}x${DEFAULT_VIDEO_HEIGHT}")
+            imageReader = ImageReader.newInstance(
+                DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT,
+                ImageFormat.JPEG, 2
+            )
+            
+            imageReader.setOnImageAvailableListener({ reader ->
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    try {
+                        val buffer = image.planes[0].buffer
+                        val bytes = ByteArray(buffer.remaining())
+                        buffer.get(bytes)
+                        
+                        // Send the JPEG data to connected clients
+                        videoWebSocketServer?.sendVideoFrame(bytes)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing image: ${e.message}", e)
+                    } finally {
+                        image.close()
+                    }
+                }
+            }, backgroundHandler)
+            
+            // Open the camera
+            if (!cameraOpenCloseLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
+                throw RuntimeException("Time out waiting to lock camera opening.")
+            }
+            
+            Log.d(TAG, "Opening camera")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                cameraManager.openCamera(cameraId, stateCallback, backgroundHandler)
+                Log.d(TAG, "Camera open request sent")
+            }
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "Failed to setup camera", e)
+            videoServerStateListener?.onError(e)
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "Interrupted while trying to lock camera", e)
+            videoServerStateListener?.onError(e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error setting up camera: ${e.message}", e)
+            videoServerStateListener?.onError(e)
+        }
+    }
+    
+    private val stateCallback = object : CameraDevice.StateCallback() {
+        override fun onOpened(camera: CameraDevice) {
+            Log.d(TAG, "Camera opened successfully")
+            cameraOpenCloseLock.release()
+            cameraDevice = camera
+            createCameraPreviewSession()
+        }
+        
+        override fun onDisconnected(camera: CameraDevice) {
+            Log.d(TAG, "Camera disconnected")
+            cameraOpenCloseLock.release()
+            camera.close()
+            cameraDevice = null
+        }
+        
+        override fun onError(camera: CameraDevice, error: Int) {
+            Log.e(TAG, "Camera device error: $error")
+            cameraOpenCloseLock.release()
+            camera.close()
+            cameraDevice = null
+            videoServerStateListener?.onError(Exception("Camera error code: $error"))
+        }
+    }
+    
+    private fun createCameraPreviewSession() {
+        try {
+            Log.d(TAG, "Creating camera preview session")
+            val surface = imageReader.surface
+            
+            // Set up capture request
+            val captureRequestBuilder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            captureRequestBuilder?.addTarget(surface)
+            
+            // Create a capture session
+            cameraDevice?.createCaptureSession(
+                listOf(surface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        Log.d(TAG, "Camera capture session configured")
+                        captureSession = session
+                        try {
+                            // Auto-focus mode
+                            captureRequestBuilder?.set(
+                                CaptureRequest.CONTROL_AF_MODE,
+                                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                            )
+                            
+                            // Start the preview
+                            val captureRequest = captureRequestBuilder?.build()
+                            captureSession?.setRepeatingRequest(captureRequest!!, null, backgroundHandler)
+                            Log.d(TAG, "Camera preview started")
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "Failed to start camera preview", e)
+                            videoServerStateListener?.onError(e)
+                        }
+                    }
+                    
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        Log.e(TAG, "Failed to configure camera capture session")
+                        videoServerStateListener?.onError(Exception("Failed to configure camera capture session"))
+                    }
+                },
+                null
+            )
+        } catch (e: CameraAccessException) {
+            Log.e(TAG, "Failed to create camera preview session", e)
+            videoServerStateListener?.onError(e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error creating camera preview session: ${e.message}", e)
+            videoServerStateListener?.onError(e)
+        }
+    }
+    
+    private fun stopCamera() {
+        try {
+            Log.d(TAG, "Stopping camera")
+            cameraOpenCloseLock.acquire()
+            captureSession?.close()
+            captureSession = null
+            
+            cameraDevice?.close()
+            cameraDevice = null
+            
+            imageReader.close()
+            Log.d(TAG, "Camera stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping camera: ${e.message}", e)
+        } finally {
+            cameraOpenCloseLock.release()
+        }
+    }
+    
+    private fun startBackgroundThread() {
+        Log.d(TAG, "Starting background thread")
+        backgroundThread = HandlerThread("CameraBackground")
+        backgroundThread.start()
+        backgroundHandler = Handler(backgroundThread.looper)
+    }
+    
+    private fun stopBackgroundThread() {
+        Log.d(TAG, "Stopping background thread")
+        try {
+            backgroundThread.quitSafely()
+            backgroundThread.join()
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "Error stopping background thread: ${e.message}", e)
+        }
+    }
+    
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "Video Stream Service"
+            val descriptionText = "Channel for Video Stream Service notifications"
+            val importance = NotificationManager.IMPORTANCE_DEFAULT
+            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+            }
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+            Log.d(TAG, "Notification channel created")
+        }
+    }
+    
+    private fun stopForeground(removeNotification: Boolean = true) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(if (removeNotification) Service.STOP_FOREGROUND_REMOVE else Service.STOP_FOREGROUND_DETACH)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(removeNotification)
+        }
+        Log.d(TAG, "Foreground service stopped")
+    }
+    
+    override fun onDestroy() {
+        Log.d(TAG, "onDestroy() - Cleaning up VideoStreamService")
+        try {
+            // Stop camera
+            stopCamera()
+            
+            // Stop WebSocket server
+            videoWebSocketServer?.stop()
+            
+            // Stop background thread
+            stopBackgroundThread()
+            
+            // Unregister broadcast receiver
+            unregisterReceiver(broadcastMessageReceiver)
+            
+            Log.d(TAG, "VideoStreamService destroyed successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onDestroy: ${e.message}", e)
+        } finally {
+            super.onDestroy()
+        }
+    }
+}

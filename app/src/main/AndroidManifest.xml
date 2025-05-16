@@ -15,6 +15,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"
         tools:ignore="HighSamplingRate" />
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <application
         android:name=".MyApplication"
@@ -46,6 +47,10 @@
             android:name=".activities.DeviceAxisActivity"
             android:exported="false"
             android:theme="@style/Theme.SensorServer.FullScreen"/>
+        <activity
+            android:name=".activities.VideoStreamActivity"
+            android:exported="false"
+            android:label="Video Stream"/>
 
         <service
             android:name=".service.WebsocketService"
@@ -56,6 +61,12 @@
         <service
             android:name=".service.HttpService"
             android:foregroundServiceType="specialUse"
+            android:enabled="true"
+            android:exported="false" />
+
+        <service
+            android:name=".service.VideoStreamService"
+            android:foregroundServiceType="camera"
             android:enabled="true"
             android:exported="false" />
 

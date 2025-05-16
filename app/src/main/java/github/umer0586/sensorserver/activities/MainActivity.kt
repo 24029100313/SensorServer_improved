@@ -27,9 +27,15 @@ import github.umer0586.sensorserver.fragments.ConnectionsFragment
 import github.umer0586.sensorserver.fragments.ServerFragment
 import github.umer0586.sensorserver.service.HttpServerStateListener
 import github.umer0586.sensorserver.service.HttpService
+import github.umer0586.sensorserver.service.VideoStreamService
 import github.umer0586.sensorserver.service.WebsocketService
 import github.umer0586.sensorserver.service.ServiceBindHelper
 import github.umer0586.sensorserver.webserver.HttpServerInfo
+import github.umer0586.sensorserver.activities.AboutActivity
+import github.umer0586.sensorserver.activities.DeviceAxisActivity
+import github.umer0586.sensorserver.activities.SettingsActivity
+import github.umer0586.sensorserver.activities.TouchScreenActivity
+import github.umer0586.sensorserver.activities.VideoStreamActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.lang.Exception
@@ -120,6 +126,9 @@ class MainActivity : AppCompatActivity(), NavigationBarView.OnItemSelectedListen
 
             if (menuItem.itemId == R.id.nav_drawer_touch_sensors)
                 startActivity( Intent(this, TouchScreenActivity::class.java) )
+                
+            if (menuItem.itemId == R.id.nav_drawer_video_stream)
+                startActivity( Intent(this, VideoStreamActivity::class.java) )
 
 
             false

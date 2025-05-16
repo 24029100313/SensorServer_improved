@@ -28,6 +28,13 @@
         android:title="Touch Screen"
         android:icon="@drawable/ic_touchscreen"
         />
+        
+    <item
+        android:id="@+id/nav_drawer_video_stream"
+        android:title="Video Stream"
+        android:icon="@drawable/ic_video_camera"
+        />
+
     <item
         android:id="@+id/nav_drawer_http_server_switch"
         android:checked="false"

@@ -100,6 +100,12 @@ class AppSettings(context: Context)
     {
         return sharedPreferences.getBoolean(context.getString(R.string.pref_key_all_interface), false)
     }
+    
+    // 视频服务器使用与WebSocket相同的端口
+    fun getVideoServerPort(): Int
+    {
+        return getWebsocketPortNo()
+    }
 
     fun saveDiscoverable(state: Boolean)
     {
