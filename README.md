@@ -1,6 +1,6 @@
 <div align="center">
 
-# SensorServer
+# SensorServer Improved
 ![GitHub](https://img.shields.io/github/license/umer0586/SensorServer?style=for-the-badge) ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/umer0586/SensorServer?style=for-the-badge) ![GitHub all releases](https://img.shields.io/github/downloads/umer0586/SensorServer/total?label=GitHub%20downloads&style=for-the-badge) ![Android](https://img.shields.io/badge/Android%205.0+-3DDC84?style=for-the-badge&logo=android&logoColor=white) ![F-Droid](https://img.shields.io/f-droid/v/github.umer0586.sensorserver?style=for-the-badge) ![Websocket](https://img.shields.io/badge/protocol-websocket-green?style=for-the-badge)
 
 [<img src="https://github.com/user-attachments/assets/0f628053-199f-4587-a5b2-034cf027fb99" height="100">](https://github.com/umer0586/SensorServer/releases) [<img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
@@ -8,7 +8,7 @@
     height="100">](https://f-droid.org/packages/github.umer0586.sensorserver)
 
  
-### SensorServer transforms Android device into a versatile sensor hub, providing real-time access to its entire array of sensors. It allows multiple Websocket clients to simultaneously connect and retrieve live sensor data.The app exposes all available sensors of the Android device, enabling WebSocket clients to read sensor data related to device position, motion (e.g., accelerometer, gyroscope), environment (e.g., temperature, light, pressure), GPS location, and even touchscreen interactions.
+### SensorServer Improved transforms Android device into a versatile sensor hub, providing real-time access to its entire array of sensors AND camera video stream. It allows multiple Websocket clients to simultaneously connect and retrieve live sensor data and video feed. The app exposes all available sensors of the Android device, enabling WebSocket clients to read sensor data related to device position, motion (e.g., accelerometer, gyroscope), environment (e.g., temperature, light, pressure), GPS location, touchscreen interactions, and now real-time camera video stream.
 
 <img src="https://github.com/umer0586/SensorServer/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/01.png" width="250" heigth="250"> <img src="https://github.com/umer0586/SensorServer/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/02.png" width="250" heigth="250"> <img src="https://github.com/umer0586/SensorServer/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/03.png" width="250" heigth="250"> <img src="https://github.com/umer0586/SensorServer/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/04.png" width="250" heigth="250"> <img src="https://github.com/umer0586/SensorServer/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/05.png" width="250" heigth="250"> <img src="https://github.com/umer0586/SensorServer/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/06.png" width="250" heigth="250">
 <img src="https://github.com/umer0586/SensorServer/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/07.png" width="250" heigth="250">
@@ -194,6 +194,83 @@ To connect over USB make sure `USB debugging` option is enable in your phone and
 * **Step 3** : use address `ws://localhost:8081:/sensor/connect?type=<sensor type here>` to connect 
 
 Make sure you have installed your android device driver and `adb devices` command detects your connected android phone.
+
+## Video Streaming Functionality
+
+This improved version of SensorServer adds real-time video streaming capabilities, allowing you to access your Android device's camera feed over WebSocket. This feature enables various applications such as remote monitoring, computer vision projects, and integrating your phone's camera into other systems.
+
+### Using Video Stream
+
+To access the video stream, connect to the following WebSocket endpoint:
+
+```
+ws://<ip>:<port>/video
+```
+
+Once connected, your client will receive a continuous stream of JPEG images that can be displayed in real-time.
+
+### Video Stream Format
+
+The video stream is sent as a series of JPEG images over WebSocket binary messages. Each binary message contains a complete JPEG image that can be directly displayed or processed.
+
+- **Resolution**: 640x480 pixels (default)
+- **Format**: JPEG images (90% quality)
+- **Delivery**: Binary WebSocket messages
+
+### Example: Displaying Video Stream in a Web Browser
+
+```javascript
+const ws = new WebSocket('ws://192.168.0.103:8086/video');
+const img = document.getElementById('videoStream');
+
+ws.binaryType = 'arraybuffer';
+ws.onmessage = function(event) {
+  // Convert binary data to Blob
+  const blob = new Blob([event.data], {type: 'image/jpeg'});
+  // Create URL object
+  const url = URL.createObjectURL(blob);
+  // Update image
+  img.src = url;
+  // Release URL object
+  URL.revokeObjectURL(img.src);
+};
+```
+
+### Example: Receiving Video Stream in Python
+
+```python
+import websocket
+import cv2
+import numpy as np
+
+def on_message(ws, message):
+    # Convert binary message to numpy array
+    arr = np.frombuffer(message, np.uint8)
+    # Decode JPEG image
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    # Display image
+    cv2.imshow('Video Stream', img)
+    cv2.waitKey(1)
+
+def on_error(ws, error):
+    print("Error:", error)
+
+def on_close(ws, close_status_code, close_msg):
+    print("Connection closed")
+    cv2.destroyAllWindows()
+
+def on_open(ws):
+    print("Connection opened")
+
+# Connect to video stream
+ws = websocket.WebSocketApp("ws://192.168.0.103:8086/video",
+                          on_open=on_open,
+                          on_message=on_message,
+                          on_error=on_error,
+                          on_close=on_close)
+
+ws.run_forever()
+```
 
 ## Links To Projects Utilizing SensorServer
 1. Utilizing smartphone IMU sensors for controlling a robot via ROS ([http://www.rc.is.ritsumei.ac.jp/FILES/PBL5/2024/IMU_based_control/](http://www.rc.is.ritsumei.ac.jp/FILES/PBL5/2024/IMU_based_control/))
