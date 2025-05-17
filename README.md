@@ -262,98 +262,98 @@ Make sure to install the required packages:
 pip install websocket-client opencv-python numpy
 ```
 
-## 视觉惯性里程计 (VIO) 实现
+## Visual-Inertial Odometry (VIO) Implementation
 
-本项目还包含两种视觉惯性里程计(Visual-Inertial Odometry, VIO)系统的实现，用于整合IMU数据、陀螺仪数据和视频流来估计相机的运动轨迹。
+This project also includes two Visual-Inertial Odometry (VIO) system implementations for integrating IMU data, gyroscope data, and video streams to estimate camera motion trajectories.
 
-### 什么是VIO？
+### What is VIO?
 
-视觉惯性里程计(VIO)是一种结合视觉信息和惯性测量单元(IMU)数据的定位技术，可以在没有GPS的环境中实现精确的位置跟踪。VIO通过融合两种互补的传感器数据源来获得更准确的位置估计：
+Visual-Inertial Odometry (VIO) is a positioning technology that combines visual information with Inertial Measurement Unit (IMU) data to achieve precise position tracking in environments without GPS. VIO obtains more accurate position estimates by fusing two complementary sensor data sources:
 
-- **视觉部分**：通过分析连续视频帧中的特征点移动来估计相机的运动
-- **惯性部分**：使用IMU(加速度计和陀螺仪)数据来预测相机的短期运动
+- **Visual Component**: Estimates camera motion by analyzing feature point movements across consecutive video frames
+- **Inertial Component**: Uses IMU (accelerometer and gyroscope) data to predict short-term camera motion
 
-### 两种VIO实现
+### Two VIO Implementations
 
-本项目提供了两种不同的VIO实现：
+This project provides two different VIO implementations:
 
-1. **简单VIO实现** (`simple_vio.py`)
-   - 基础的视觉惯性融合
-   - 使用ORB特征和简单加权融合策略
+1. **Simple VIO Implementation** (`simple_vio.py`)
+   - Basic visual-inertial fusion
+   - Uses ORB features and simple weighted fusion strategy
 
-2. **基于VINS-Mono架构的VIO系统** (`vins_inspired/`)
-   - 参考香港科技大学VINS-Mono项目的架构
-   - 包含特征跟踪、IMU预积分、初始化、滑动窗口优化等模块
-   - 更加完善的状态估计和融合策略
+2. **VINS-Mono Architecture-based VIO System** (`vins_inspired/`)
+   - References the architecture of the VINS-Mono project from Hong Kong University of Science and Technology
+   - Includes feature tracking, IMU preintegration, initialization, sliding window optimization, and other modules
+   - More comprehensive state estimation and fusion strategy
 
-### 数据收集
+### Data Collection
 
-在使用VIO系统前，需要先收集传感器数据：
+Before using the VIO system, you need to collect sensor data:
 
 ```bash
 python data_collector.py
 ```
 
-该脚本会引导您完成六种不同运动模式的数据收集：
-- x轴正向负向运动
-- y轴正向负向运动
-- z轴正向负向运动
-- x轴旋转
-- y轴旋转
-- z轴旋转
+This script will guide you through collecting data for six different motion patterns:
+- Positive and negative movement along the x-axis
+- Positive and negative movement along the y-axis
+- Positive and negative movement along the z-axis
+- Rotation around the x-axis
+- Rotation around the y-axis
+- Rotation around the z-axis
 
-每种运动模式会分别收集IMU数据、陀螺仪数据和视频帧，并保存在结构化的目录中，包含详细的元数据信息。
+Each motion pattern will collect IMU data, gyroscope data, and video frames, saving them in a structured directory with detailed metadata.
 
-### 运行VIO系统
+### Running the VIO System
 
-收集完数据后，可以选择运行以下任一VIO系统：
+After collecting the data, you can choose to run either VIO system:
 
 ```bash
-# 运行简单VIO实现
+# Run the simple VIO implementation
 python simple_vio.py
 
-# 运行基于VINS-Mono架构的VIO系统
+# Run the VINS-Mono architecture-based VIO system
 python run_vins_inspired_vio.py
 ```
 
-程序会自动处理最新收集的数据，并为每种运动类型生成轨迹和可视化结果。
+The program will automatically process the most recently collected data and generate trajectories and visualization results for each motion type.
 
-### 结果输出
+### Output Results
 
-VIO系统会生成以下输出：
+The VIO system generates the following outputs:
 
-1. **轨迹图**：显示估计的3D相机运动轨迹
-2. **可视化视频**：包含特征点跟踪和状态信息的视频
-3. **轨迹数据**：保存的轨迹坐标数据
-4. **HTML报告**：汇总所有运动类型的处理结果（VINS架构版本）
+1. **Trajectory Plots**: Displays the estimated 3D camera motion trajectory
+2. **Visualization Videos**: Videos containing feature tracking and state information
+3. **Trajectory Data**: Saved trajectory coordinate data
+4. **HTML Report**: Summary of processing results for all motion types (VINS architecture version)
 
-所有结果都保存在对应运动类型的`vio_results`子目录中。
+All results are saved in the `vio_results` subdirectory for the corresponding motion type.
 
-### 技术细节
+### Technical Details
 
-VINS架构的VIO系统包含以下核心模块：
+The VINS architecture VIO system includes the following core modules:
 
-1. **特征跟踪器** (`feature_tracker.py`)
-   - 使用光流法跟踪特征点
-   - 管理特征点ID和生命周期
+1. **Feature Tracker** (`feature_tracker.py`)
+   - Tracks feature points using optical flow
+   - Manages feature point IDs and lifecycles
 
-2. **IMU预积分** (`imu_preintegration.py`)
-   - 执行IMU数据预积分
-   - 处理偏置校正
+2. **IMU Preintegration** (`imu_preintegration.py`)
+   - Performs IMU data preintegration
+   - Handles bias correction
 
-3. **初始化器** (`initializer.py`)
-   - 执行视觉SFM初始化
-   - 估计重力方向和尺度
+3. **Initializer** (`initializer.py`)
+   - Performs visual SFM initialization
+   - Estimates gravity direction and scale
 
-4. **滑动窗口优化器** (`sliding_window_optimizer.py`)
-   - 维护滑动窗口状态
-   - 融合视觉和IMU约束
+4. **Sliding Window Optimizer** (`sliding_window_optimizer.py`)
+   - Maintains sliding window state
+   - Fuses visual and IMU constraints
 
-5. **VIO系统** (`vio_system.py`)
-   - 整合所有模块
-   - 处理传感器数据
+5. **VIO System** (`vio_system.py`)
+   - Integrates all modules
+   - Processes sensor data
 
-### 系统要求
+### System Requirements
 
 - Python 3.6+
 - OpenCV
