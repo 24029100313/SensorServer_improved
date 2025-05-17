@@ -199,7 +199,7 @@ Make sure you have installed your android device driver and `adb devices` comman
 
 This improved version of SensorServer adds real-time video streaming capabilities, allowing you to access your Android device's camera feed over WebSocket. This feature enables various applications such as remote monitoring, computer vision projects, and integrating your phone's camera into other systems.
 
-### Using Video Stream
+### Accessing the Video Stream
 
 To access the video stream, connect to the following WebSocket endpoint:
 
@@ -207,60 +207,45 @@ To access the video stream, connect to the following WebSocket endpoint:
 ws://<ip>:<port>/video
 ```
 
-Once connected, your client will receive a continuous stream of JPEG images that can be displayed in real-time.
+The video stream is sent as Base64-encoded JPEG frames, which can be decoded and processed by your client application.
 
-### Video Stream Format
+### Python Example for Video Stream
 
-The video stream is sent as a series of JPEG images over WebSocket binary messages. Each binary message contains a complete JPEG image that can be directly displayed or processed.
-
-- **Resolution**: 640x480 pixels (default)
-- **Format**: JPEG images (90% quality)
-- **Delivery**: Binary WebSocket messages
-
-### Example: Displaying Video Stream in a Web Browser
-
-```javascript
-const ws = new WebSocket('ws://192.168.0.103:8086/video');
-const img = document.getElementById('videoStream');
-
-ws.binaryType = 'arraybuffer';
-ws.onmessage = function(event) {
-  // Convert binary data to Blob
-  const blob = new Blob([event.data], {type: 'image/jpeg'});
-  // Create URL object
-  const url = URL.createObjectURL(blob);
-  // Update image
-  img.src = url;
-  // Release URL object
-  URL.revokeObjectURL(img.src);
-};
-```
-
-### Example: Receiving Video Stream in Python
+Here's a simple Python example that connects to the video stream and displays it:
 
 ```python
 import websocket
+import json
 import cv2
 import numpy as np
+import base64
 
 def on_message(ws, message):
-    # Convert binary message to numpy array
-    arr = np.frombuffer(message, np.uint8)
-    # Decode JPEG image
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    # Display image
-    cv2.imshow('Video Stream', img)
-    cv2.waitKey(1)
+    try:
+        # Decode base64 image
+        img_data = base64.b64decode(message)
+        
+        # Convert to numpy array
+        nparr = np.frombuffer(img_data, np.uint8)
+        
+        # Decode image
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Display image
+        cv2.imshow("Video Stream", img)
+        cv2.waitKey(1)
+    except Exception as e:
+        print(f"Error processing frame: {e}")
 
 def on_error(ws, error):
-    print("Error:", error)
+    print(f"Error: {error}")
 
-def on_close(ws, close_status_code, close_msg):
-    print("Connection closed")
+def on_close(ws, close_code, reason):
+    print(f"Connection closed: {reason}")
     cv2.destroyAllWindows()
 
 def on_open(ws):
-    print("Connection opened")
+    print("Connected to video stream")
 
 # Connect to video stream
 ws = websocket.WebSocketApp("ws://192.168.0.103:8086/video",
@@ -272,37 +257,106 @@ ws = websocket.WebSocketApp("ws://192.168.0.103:8086/video",
 ws.run_forever()
 ```
 
-## Links To Projects Utilizing SensorServer
-1. Utilizing smartphone IMU sensors for controlling a robot via ROS ([http://www.rc.is.ritsumei.ac.jp/FILES/PBL5/2024/IMU_based_control/](http://www.rc.is.ritsumei.ac.jp/FILES/PBL5/2024/IMU_based_control/))
-2. Use smartphone as "sensor" into RTMaps studio ([https://github.com/Intempora/smartphone-sensors](https://github.com/Intempora/smartphone-sensors))
-3. Streams IMU and GPS data via WebSocket from Android app and integrates with MinIO CSI server for building-scale WiFi sensing testbeds. ([https://github.com/WS-UB/WiSense-Mobile-Client](https://github.com/WS-UB/WiSense-Mobile-Client))
-4. SLAM System with IMU and Wifi Synchronization. ([https://github.com/WS-UB/imu_publisher](https://github.com/WS-UB/imu_publisher))
-5. Middleware for Streaming Real Device Sensor Data to Android Emulators. ([https://github.com/ingmarfjolla/android-sensor-injection](https://github.com/ingmarfjolla/android-sensor-injection))
-6. A Python graphical user interface to visualize real-time data streams from a generic WebSocket & HTTP source ([https://github.com/AlyShmahell/robolytics](https://github.com/AlyShmahell/robolytics))
-7. Tool designed to address the current limitations of passthrough mode in modern virtual reality (VR) headsets.([https://github.com/LucasHartmanWestern/Screen-Sight](https://github.com/LucasHartmanWestern/Screen-Sight))
-8. Real-Time Sensor Data Streaming, Storage, and Visualization System with Kafka, InfluxDB, and Grafana.([https://github.com/TouradBaba/Iot_sensors_streaming](https://github.com/TouradBaba/Iot_sensors_streaming))
-9. A project that uses data from IMU, GPS and Barometer modules to estimate position based on space state filters implementation [https://github.com/Peterex08/IMUGPS](https://github.com/Peterex08/IMUGPS)
-10. A Windows desktop application that transforms a smartphone into a gesture‑based remote control. It streams real‑time sensor (gyroscope) data over WebSockets, recognizes swipe gestures, and maps them to system or media actions on the desktop [https://github.com/Guerric9018/Frogmote](https://github.com/Guerric9018/Frogmote)
-11. PHASETIMER ([https://github.com/zenbooster/phasetimer](https://github.com/zenbooster/phasetimer))
-12. Score real-time walking data of users wearing an Andriod device. ([https://github.com/eliasHw/BME450W_Fall2022](https://github.com/eliasHw/BME450W_Fall2022))
-13. Wireless Steering wheel using python and android with paddles and breaks. ([https://rutube.ru/video/03d53de54054337a8c54b825f7fcc3fe/](https://rutube.ru/video/03d53de54054337a8c54b825f7fcc3fe/))
-14. [https://github.com/strets123/walking-pictionary](https://github.com/strets123/walking-pictionary)
+Make sure to install the required packages:
+```bash
+pip install websocket-client opencv-python numpy
+```
 
-If you're using this app in a project and would like to share the link, feel free to submit a pull request with the link and a brief description so that it can be helpful to others.
+## 视觉惯性里程计 (VIO) 实现
 
-# My Other Android Projects
-1. [SensaGram](https://github.com/umer0586/SensaGram). For streaming realtime sensor data over UDP
-2. [DroidPad](https://github.com/umer0586/DroidPad). Android app for creating customizable control interfaces for Bluetooth Low energy,WebSocket, MQTT, TCP, and UDP protocols. 
+本项目还包含两种视觉惯性里程计(Visual-Inertial Odometry, VIO)系统的实现，用于整合IMU数据、陀螺仪数据和视频流来估计相机的运动轨迹。
 
-## Found this useful
-<a href="https://www.buymeacoffee.com/umerfarooq" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+### 什么是VIO？
 
-Send Bitcoin at 1NHkiJmjUdjqbCKJf6ZksGKMvYu52Q5tew 
+视觉惯性里程计(VIO)是一种结合视觉信息和惯性测量单元(IMU)数据的定位技术，可以在没有GPS的环境中实现精确的位置跟踪。VIO通过融合两种互补的传感器数据源来获得更准确的位置估计：
 
-OR
+- **视觉部分**：通过分析连续视频帧中的特征点移动来估计相机的运动
+- **惯性部分**：使用IMU(加速度计和陀螺仪)数据来预测相机的短期运动
 
-Scan following QR code with bitcoin wallet app to send bitcoins
+### 两种VIO实现
 
-[<img src="https://github.com/umer0586/SensorServer/assets/35717992/11cd8194-6e9c-469c-a09f-06fd1bc93acd" height="200">](https://github.com/umer0586/SensorServer/assets/35717992/11cd8194-6e9c-469c-a09f-06fd1bc93acd)
+本项目提供了两种不同的VIO实现：
 
+1. **简单VIO实现** (`simple_vio.py`)
+   - 基础的视觉惯性融合
+   - 使用ORB特征和简单加权融合策略
 
+2. **基于VINS-Mono架构的VIO系统** (`vins_inspired/`)
+   - 参考香港科技大学VINS-Mono项目的架构
+   - 包含特征跟踪、IMU预积分、初始化、滑动窗口优化等模块
+   - 更加完善的状态估计和融合策略
+
+### 数据收集
+
+在使用VIO系统前，需要先收集传感器数据：
+
+```bash
+python data_collector.py
+```
+
+该脚本会引导您完成六种不同运动模式的数据收集：
+- x轴正向负向运动
+- y轴正向负向运动
+- z轴正向负向运动
+- x轴旋转
+- y轴旋转
+- z轴旋转
+
+每种运动模式会分别收集IMU数据、陀螺仪数据和视频帧，并保存在结构化的目录中，包含详细的元数据信息。
+
+### 运行VIO系统
+
+收集完数据后，可以选择运行以下任一VIO系统：
+
+```bash
+# 运行简单VIO实现
+python simple_vio.py
+
+# 运行基于VINS-Mono架构的VIO系统
+python run_vins_inspired_vio.py
+```
+
+程序会自动处理最新收集的数据，并为每种运动类型生成轨迹和可视化结果。
+
+### 结果输出
+
+VIO系统会生成以下输出：
+
+1. **轨迹图**：显示估计的3D相机运动轨迹
+2. **可视化视频**：包含特征点跟踪和状态信息的视频
+3. **轨迹数据**：保存的轨迹坐标数据
+4. **HTML报告**：汇总所有运动类型的处理结果（VINS架构版本）
+
+所有结果都保存在对应运动类型的`vio_results`子目录中。
+
+### 技术细节
+
+VINS架构的VIO系统包含以下核心模块：
+
+1. **特征跟踪器** (`feature_tracker.py`)
+   - 使用光流法跟踪特征点
+   - 管理特征点ID和生命周期
+
+2. **IMU预积分** (`imu_preintegration.py`)
+   - 执行IMU数据预积分
+   - 处理偏置校正
+
+3. **初始化器** (`initializer.py`)
+   - 执行视觉SFM初始化
+   - 估计重力方向和尺度
+
+4. **滑动窗口优化器** (`sliding_window_optimizer.py`)
+   - 维护滑动窗口状态
+   - 融合视觉和IMU约束
+
+5. **VIO系统** (`vio_system.py`)
+   - 整合所有模块
+   - 处理传感器数据
+
+### 系统要求
+
+- Python 3.6+
+- OpenCV
+- NumPy
+- SciPy
+- Matplotlib
