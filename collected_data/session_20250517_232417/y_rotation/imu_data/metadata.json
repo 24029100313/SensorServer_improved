@@ -1,0 +1,7 @@
+{
+  "data_type": "imu",
+  "movement": "y_rotation",
+  "record_start_time": "2025-05-17T23:25:02.090456",
+  "record_end_time": "2025-05-17T23:25:10.095654",
+  "sample_count": 49
+}

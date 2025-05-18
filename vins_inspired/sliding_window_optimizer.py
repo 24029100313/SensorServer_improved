@@ -1,6 +1,39 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import minimize
+import numba
+import time
+
+# 使用Numba加速的独立函数
+@numba.jit(nopython=True)
+def compute_reprojection_error_batch(points_3d, points_2d, K, R, t):
+    """
+    批量计算重投影误差
+    
+    参数:
+        points_3d: 3D点数组 (N, 3)
+        points_2d: 2D点数组 (N, 2)
+        K: 相机内参矩阵 (3, 3)
+        R: 旋转矩阵 (3, 3)
+        t: 平移向量 (3,)
+        
+    返回:
+        重投影误差数组 (N,)
+    """
+    errors = np.zeros(len(points_3d))
+    
+    for i in range(len(points_3d)):
+        # 转换到相机坐标系
+        p_cam = R @ points_3d[i] + t
+        
+        # 投影到图像平面
+        p_img = K @ p_cam
+        p_img = p_img[:2] / p_img[2]
+        
+        # 计算误差
+        errors[i] = np.linalg.norm(points_2d[i] - p_img)
+    
+    return errors
 
 class SlidingWindowOptimizer:
     """
@@ -41,6 +74,16 @@ class SlidingWindowOptimizer:
         
         # 重力向量
         self.gravity = np.array([0, 0, 9.81])
+        
+        # 缓存
+        self.rotation_cache = {}
+        self.last_optimization_time = 0
+        self.optimization_count = 0
+        
+        # 优化参数
+        self.max_iterations = 10
+        self.convergence_threshold = 1e-6
+        self.use_robust_cost = True
     
     def set_camera_params(self, K, R_cam_imu, t_cam_imu):
         """
@@ -100,7 +143,7 @@ class SlidingWindowOptimizer:
         if len(self.states) > self.window_size:
             self._marginalize()
     
-    def optimize(self, max_iterations=10):
+    def optimize(self, max_iterations=None):
         """
         执行滑动窗口优化
         
@@ -113,8 +156,18 @@ class SlidingWindowOptimizer:
         if len(self.states) < 2:
             return self.states
         
-        # 构建优化问题
-        # 这里使用简化的实现，实际应该使用专门的非线性优化库如Ceres或g2o
+        # 记录开始时间
+        start_time = time.time()
+        
+        # 使用传入的迭代次数或默认值
+        max_iter = max_iterations if max_iterations is not None else self.max_iterations
+        
+        # 根据优化次数动态调整迭代次数，减少计算量
+        if self.optimization_count > 0:
+            # 如果是连续优化，可以减少迭代次数
+            time_since_last = time.time() - self.last_optimization_time
+            if time_since_last < 0.1:  # 如果距离上次优化时间很短
+                max_iter = max(3, max_iter // 2)  # 减少迭代次数，但至少3次
         
         # 将状态转换为优化变量
         initial_params = self._states_to_params()
@@ -146,13 +199,30 @@ class SlidingWindowOptimizer:
         result = minimize(
             objective_function,
             initial_params,
-            method='L-BFGS-B',
-            options={'maxiter': max_iterations}
+            method='L-BFGS-B',  # 使用L-BFGS-B方法，比默认的BFGS更快
+            options={
+                'maxiter': max_iter,
+                'ftol': self.convergence_threshold,
+                'disp': False
+            }
         )
         
         # 更新状态
         optimized_states = self._params_to_states(result.x)
         self.states = optimized_states
+        
+        # 更新缓存
+        self.rotation_cache = {}
+        for i, state in enumerate(self.states):
+            self.rotation_cache[i] = state['rotation']
+        
+        # 更新优化统计信息
+        self.last_optimization_time = time.time()
+        self.optimization_count += 1
+        
+        # 打印优化性能
+        optimization_time = time.time() - start_time
+        print(f"优化完成: {result.nit}次迭代, 耗时{optimization_time:.4f}秒")
         
         return optimized_states
     
@@ -310,47 +380,78 @@ class SlidingWindowOptimizer:
         返回:
             重投影误差
         """
-        if self.K is None:
-            return 0.0
-        
         total_error = 0.0
+        feature_count = 0
         
-        # 三角化特征点
-        triangulated_points = self._triangulate_features(states)
+        # 使用缓存的旋转矩阵
+        if not self.rotation_cache:
+            for i, state in enumerate(states):
+                self.rotation_cache[i] = state['rotation']
         
-        # 计算重投影误差
-        for feature_id, point_3d in triangulated_points.items():
-            for frame_idx, observation in self.feature_observations[feature_id].items():
-                if frame_idx >= len(states):
+        # 遍历特征点
+        for feature_id, observations in self.feature_observations.items():
+            if len(observations) < 2:
+                continue
+            
+            # 选择一个关键帧作为参考帧
+            ref_frame_idx = min(observations.keys())
+            ref_state = states[ref_frame_idx]
+            
+            # 获取特征点在参考帧中的观测
+            ref_observation = observations[ref_frame_idx]
+            
+            # 将特征点从图像平面反投影到3D空间
+            # 假设深度为1，后续会优化
+            ref_point_img = np.array([ref_observation[0], ref_observation[1], 1.0])
+            ref_point_cam = np.linalg.inv(self.K) @ ref_point_img
+            
+            # 将特征点从相机坐标系转换到IMU坐标系
+            ref_R_imu_cam = self.R_cam_imu.T
+            ref_t_imu_cam = -ref_R_imu_cam @ self.t_cam_imu
+            ref_point_imu = ref_R_imu_cam @ ref_point_cam + ref_t_imu_cam
+            
+            # 将特征点从IMU坐标系转换到世界坐标系
+            ref_R_w_imu = ref_state['rotation']
+            ref_t_w_imu = ref_state['position']
+            point_world = ref_R_w_imu @ ref_point_imu + ref_t_w_imu
+            
+            # 计算其他帧的重投影误差
+            for frame_idx, observation in observations.items():
+                if frame_idx == ref_frame_idx:
                     continue
                 
-                # 提取状态
                 state = states[frame_idx]
                 
-                # 计算投影
-                # 从世界坐标系到相机坐标系
-                R_world_imu = state['rotation']
-                t_world_imu = state['position']
+                # 将特征点从世界坐标系转换到当前帧的IMU坐标系
+                R_imu_w = state['rotation'].T
+                t_imu_w = -R_imu_w @ state['position']
+                point_imu = R_imu_w @ point_world + t_imu_w
                 
-                # 从IMU坐标系到相机坐标系
-                R_world_cam = self.R_cam_imu @ R_world_imu
-                t_world_cam = self.R_cam_imu @ t_world_imu + self.t_cam_imu
-                
-                # 投影
-                point_cam = R_world_cam @ point_3d + t_world_cam
+                # 将特征点从IMU坐标系转换到相机坐标系
+                point_cam = self.R_cam_imu @ point_imu + self.t_cam_imu
                 
                 # 检查点是否在相机前方
                 if point_cam[2] <= 0:
                     continue
                 
-                # 投影到图像平面
-                point_img = self.K @ (point_cam / point_cam[2])
-                projected = point_img[:2]
+                # 将特征点投影到图像平面
+                point_img = self.K @ point_cam
+                point_img = point_img[:2] / point_cam[2]
                 
                 # 计算重投影误差
-                error = np.linalg.norm(observation - projected) ** 2
+                observation_vec = np.array(observation)
+                error = np.linalg.norm(observation_vec - point_img)
+                
+                # 使用鲁棒核函数
+                if self.use_robust_cost:
+                    error = self._huber_loss(error, 1.0)
                 
                 total_error += error
+                feature_count += 1
+        
+        # 归一化误差
+        if feature_count > 0:
+            total_error /= feature_count
         
         return total_error
     
@@ -527,3 +628,19 @@ class SlidingWindowOptimizer:
                 # 如果特征不再被观测，移除它
                 if len(self.feature_observations[feature_id]) == 0:
                     del self.feature_observations[feature_id]
+    
+    def _huber_loss(self, error, delta):
+        """
+        Huber损失函数，用于降低离群值的影响
+        
+        参数:
+            error: 误差值
+            delta: 阈值
+            
+        返回:
+            鲁棒化后的误差
+        """
+        if error <= delta:
+            return 0.5 * error**2
+        else:
+            return delta * (error - 0.5 * delta)

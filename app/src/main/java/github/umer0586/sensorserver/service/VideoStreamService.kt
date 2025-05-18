@@ -10,6 +10,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -45,7 +49,7 @@ interface VideoServerStateListener {
     fun onRunning(videoServerInfo: VideoServerInfo)
 }
 
-class VideoStreamService : Service() {
+class VideoStreamService : Service(), SensorEventListener {
     
     private var videoServerStateListener: VideoServerStateListener? = null
     private var videoWebSocketServer: VideoWebSocketServer? = null
@@ -62,6 +66,13 @@ class VideoStreamService : Service() {
     private lateinit var backgroundHandler: Handler
     private val cameraOpenCloseLock = Semaphore(1)
     
+    // Sensor related variables
+    private lateinit var sensorManager: SensorManager
+    private var accelerometer: Sensor? = null
+    private var gyroscope: Sensor? = null
+    private var sensorHandlerThread: HandlerThread? = null
+    private var sensorHandler: Handler? = null
+    
     companion object {
         private val TAG: String = VideoStreamService::class.java.simpleName
         const val CHANNEL_ID = "VideoStreamServiceChannel"
@@ -69,7 +80,7 @@ class VideoStreamService : Service() {
         val ACTION_STOP_VIDEO_STREAM = "ACTION_STOP_VIDEO_STREAM_" + VideoStreamService::class.java.name
         private const val DEFAULT_VIDEO_WIDTH = 640
         private const val DEFAULT_VIDEO_HEIGHT = 480
-        private const val DEFAULT_PORT = 8086
+        private const val DEFAULT_PORT = 8080
     }
     
     override fun onCreate() {
@@ -80,6 +91,12 @@ class VideoStreamService : Service() {
             // Initialize camera manager
             cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
             Log.d(TAG, "CameraManager initialized")
+            
+            // Initialize sensor manager
+            sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            Log.d(TAG, "SensorManager initialized")
             
             // Initialize app settings
             appSettings = AppSettings(this)
@@ -162,6 +179,9 @@ class VideoStreamService : Service() {
                     
                     // Start camera preview
                     setupCamera()
+                    
+                    // Start sensors
+                    startSensors()
                     
                     // Create notification
                     val activityIntent = Intent(this, MainActivity::class.java)
@@ -251,15 +271,32 @@ class VideoStreamService : Service() {
         }
     }
     
-    private fun setupCamera() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "Camera permission not granted")
-            videoServerStateListener?.onError(Exception("Camera permission not granted"))
-            return
+    private fun startSensors() {
+        Log.d(TAG, "Starting sensors")
+        accelerometer?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL, sensorHandler)
+            Log.d(TAG, "Accelerometer registered")
         }
         
+        gyroscope?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL, sensorHandler)
+            Log.d(TAG, "Gyroscope registered")
+        }
+    }
+    
+    private fun stopSensors() {
+        Log.d(TAG, "Stopping sensors")
+        sensorManager.unregisterListener(this)
+    }
+    
+    private fun setupCamera() {
         try {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                Log.e(TAG, "Camera permission not granted")
+                videoServerStateListener?.onError(Exception("Camera permission not granted"))
+                return
+            }
+            
             Log.d(TAG, "Setting up camera...")
             // Find the first back-facing camera
             val cameraIdList = cameraManager.cameraIdList
@@ -490,18 +527,34 @@ class VideoStreamService : Service() {
     
     private fun startBackgroundThread() {
         Log.d(TAG, "Starting background thread")
+        // 相机线程
         backgroundThread = HandlerThread("CameraBackground")
         backgroundThread.start()
         backgroundHandler = Handler(backgroundThread.looper)
+        
+        // 传感器线程
+        sensorHandlerThread = HandlerThread("SensorBackground")
+        sensorHandlerThread?.start()
+        sensorHandler = sensorHandlerThread?.looper?.let { Handler(it) }
     }
     
     private fun stopBackgroundThread() {
         Log.d(TAG, "Stopping background thread")
+        
+        // 停止相机线程
+        backgroundThread.quitSafely()
         try {
-            backgroundThread.quitSafely()
             backgroundThread.join()
         } catch (e: InterruptedException) {
-            Log.e(TAG, "Error stopping background thread: ${e.message}", e)
+            Log.e(TAG, "Error stopping camera background thread", e)
+        }
+        
+        // 停止传感器线程
+        sensorHandlerThread?.quitSafely()
+        try {
+            sensorHandlerThread?.join()
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "Error stopping sensor background thread", e)
         }
     }
     
@@ -529,26 +582,34 @@ class VideoStreamService : Service() {
         Log.d(TAG, "Foreground service stopped")
     }
     
+    // SensorEventListener接口实现
+    override fun onSensorChanged(event: SensorEvent) {
+        when (event.sensor.type) {
+            Sensor.TYPE_ACCELEROMETER -> {
+                videoWebSocketServer?.sendIMUData(event)
+            }
+            Sensor.TYPE_GYROSCOPE -> {
+                videoWebSocketServer?.sendGyroData(event)
+            }
+        }
+    }
+    
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // 不需要处理精度变化
+    }
+    
     override fun onDestroy() {
         Log.d(TAG, "onDestroy() - Cleaning up VideoStreamService")
         try {
-            // Stop camera
-            stopCamera()
-            
-            // Stop WebSocket server
-            videoWebSocketServer?.stop()
-            
-            // Stop background thread
-            stopBackgroundThread()
-            
-            // Unregister broadcast receiver
             unregisterReceiver(broadcastMessageReceiver)
-            
-            Log.d(TAG, "VideoStreamService destroyed successfully")
+            stopSensors()
+            stopCamera()
+            stopBackgroundThread()
+            videoWebSocketServer?.stop()
         } catch (e: Exception) {
             Log.e(TAG, "Error in onDestroy: ${e.message}", e)
-        } finally {
-            super.onDestroy()
         }
+        
+        super.onDestroy()
     }
 }

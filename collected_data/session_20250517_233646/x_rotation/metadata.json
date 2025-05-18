@@ -1,0 +1,10 @@
+{
+  "movement_type": "x_rotation",
+  "description": "\u8bf7\u7ed5\u7740\u624b\u673aX\u8f74\uff08\u5de6\u53f3\uff09\u65cb\u8f6c\u624b\u673a",
+  "created_at": "2025-05-17T23:37:20.091701",
+  "completed_at": "2025-05-17T23:37:28.096846",
+  "imu_samples": 49,
+  "gyro_samples": 50,
+  "video_frames": 89,
+  "duration_seconds": 8.010210037231445
+}

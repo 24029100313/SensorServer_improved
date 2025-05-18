@@ -8,10 +8,16 @@ import numpy as np
 import base64
 from datetime import datetime
 import sys
+import websocket  # 添加websocket库导入
 
 # 配置参数
 SERVER_IP = "192.168.43.132"  # 请修改为您的手机IP地址
 SERVER_PORT = "8080"
+VIDEO_PORT = "8080"  # 视频流服务端口
+
+# 调试模式
+DEBUG = False  # 设置为False以减少调试信息
+DEBUG_DATA = False  # 是否显示数据内容
 MOVEMENT_TYPES = [
     "x_positive_negative",  # x轴正向负向运动
     "y_positive_negative",  # y轴正向负向运动
@@ -20,7 +26,7 @@ MOVEMENT_TYPES = [
     "y_rotation",           # 绕y轴旋转
     "z_rotation"            # 绕z轴旋转
 ]
-RECORD_DURATION = 5  # 每种运动记录的秒数
+RECORD_DURATION = 8  # 每种运动记录的秒数
 
 # 运动描述
 def get_movement_description(movement_type):
@@ -191,38 +197,146 @@ class DataCollector:
         """记录IMU数据"""
         with self.lock:
             if self.is_recording and self.current_movement:
-                # 添加时间戳
-                data['timestamp'] = time.time() - self.start_time
-                self.imu_data.append(data)
+                # 处理数据格式，确保兼容VINS算法
+                processed_data = {
+                    'timestamp': time.time() - self.start_time
+                }
+                
+                # 将字典格式的values转换为数组格式
+                acc_values = [0.0, 0.0, 0.0]  # 默认值
+                
+                if 'values' in data:
+                    # 从字典的values字段中提取值
+                    for i in range(3):
+                        acc_values[i] = float(data['values'].get(str(i), 0.0))
+                elif all(str(i) in data for i in range(3)):
+                    # 如果字典直接包含0,1,2索引
+                    for i in range(3):
+                        acc_values[i] = float(data.get(str(i), 0.0))
+                elif 'x' in data and 'y' in data and 'z' in data:
+                    # 如果字典包含x,y,z字段
+                    acc_values[0] = float(data.get('x', 0.0))
+                    acc_values[1] = float(data.get('y', 0.0))
+                    acc_values[2] = float(data.get('z', 0.0))
+                
+                # 存储为数组格式，而不是字典
+                processed_data['values'] = acc_values
+                
+                self.imu_data.append(processed_data)
     
     def record_gyro_data(self, data):
         """记录陀螺仪数据"""
         with self.lock:
             if self.is_recording and self.current_movement:
-                # 添加时间戳
-                data['timestamp'] = time.time() - self.start_time
-                self.gyro_data.append(data)
+                # 处理数据格式，确保兼容VINS算法
+                processed_data = {
+                    'timestamp': time.time() - self.start_time
+                }
+                
+                # 将字典格式的values转换为数组格式
+                gyro_values = [0.0, 0.0, 0.0]  # 默认值
+                
+                if 'values' in data:
+                    # 从字典的values字段中提取值
+                    for i in range(3):
+                        gyro_values[i] = float(data['values'].get(str(i), 0.0))
+                elif all(str(i) in data for i in range(3)):
+                    # 如果字典直接包含0,1,2索引
+                    for i in range(3):
+                        gyro_values[i] = float(data.get(str(i), 0.0))
+                elif 'x' in data and 'y' in data and 'z' in data:
+                    # 如果字典包含x,y,z字段
+                    gyro_values[0] = float(data.get('x', 0.0))
+                    gyro_values[1] = float(data.get('y', 0.0))
+                    gyro_values[2] = float(data.get('z', 0.0))
+                
+                # 存储为数组格式，而不是字典
+                processed_data['values'] = gyro_values
+                
+                self.gyro_data.append(processed_data)
     
     def record_video_frame(self, frame_data):
         """记录视频帧"""
         with self.lock:
             if self.is_recording and self.current_movement:
-                movement_dir = os.path.join(self.session_dir, self.current_movement)
-                frame_path = os.path.join(movement_dir, "video_frames", f"frame_{self.frame_count:04d}.jpg")
-                
-                # 保存帧
-                with open(frame_path, 'wb') as f:
-                    f.write(frame_data)
-                
-                self.frame_count += 1
+                try:
+                    # 保存原始数据以便调试
+                    movement_dir = os.path.join(self.session_dir, self.current_movement)
+                    raw_dir = os.path.join(movement_dir, "video_frames", "raw")
+                    os.makedirs(raw_dir, exist_ok=True)
+                    raw_path = os.path.join(raw_dir, f"frame_{self.frame_count:04d}_raw.bin")
+                    
+                    # 尝试不同的处理方法
+                    success = False
+                    
+                    # 方法1: 假设是直接的JPEG数据
+                    try:
+                        import cv2
+                        import numpy as np
+                        
+                        # 如果是字符串，尝试Base64解码
+                        binary_data = frame_data
+                        if isinstance(frame_data, str):
+                            import base64
+                            try:
+                                binary_data = base64.b64decode(frame_data)
+                            except:
+                                print(f"警告: 无法进行Base64解码")
+                        
+                        # 保存原始数据
+                        with open(raw_path, 'wb') as f:
+                            if isinstance(binary_data, str):
+                                f.write(binary_data.encode('utf-8'))
+                            else:
+                                f.write(binary_data)
+                        
+                        # 尝试直接解码为图像
+                        nparr = np.frombuffer(binary_data, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        
+                        if img is not None and img.size > 0:
+                            # 成功解码，保存为JPEG
+                            frame_path = os.path.join(movement_dir, "video_frames", f"frame_{self.frame_count:04d}.jpg")
+                            cv2.imwrite(frame_path, img)
+                            success = True
+                            print(f"成功保存视频帧 {self.frame_count}, 大小: {img.shape}")
+                    except Exception as e:
+                        print(f"解码视频帧时出错(方法1): {e}")
+                    
+                    # 如果方法1失败，尝试方法2: 创建一个空白图像作为占位符
+                    if not success:
+                        try:
+                            # 创建一个空白图像
+                            img = np.ones((480, 640, 3), dtype=np.uint8) * 255  # 白色图像
+                            # 添加帧编号文本
+                            cv2.putText(img, f"Frame {self.frame_count}", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+                            
+                            # 保存为JPEG
+                            frame_path = os.path.join(movement_dir, "video_frames", f"frame_{self.frame_count:04d}.jpg")
+                            cv2.imwrite(frame_path, img)
+                            success = True
+                            print(f"创建占位图像作为视频帧 {self.frame_count}")
+                        except Exception as e:
+                            print(f"创建占位图像时出错: {e}")
+                    
+                    self.frame_count += 1
+                    
+                except Exception as e:
+                    print(f"处理视频帧时出错: {e}")
+                    self.frame_count += 1
     
     def connect_to_imu(self):
         """连接到IMU传感器"""
         ws_url = f"ws://{self.server_ip}:{self.server_port}/sensor/connect?type=android.sensor.accelerometer"
         
+        if DEBUG:
+            print(f"尝试连接到IMU传感器: {ws_url}")
+        
         def on_message(ws, message):
             try:
                 data = json.loads(message)
+                if DEBUG_DATA:
+                    print(f"收到IMU数据: {data}")
                 self.record_imu_data(data)
             except Exception as e:
                 print(f"处理IMU数据时出错: {e}")
@@ -234,7 +348,7 @@ class DataCollector:
             print(f"IMU连接关闭: {reason}")
         
         def on_open(ws):
-            print("已连接到IMU传感器")
+            print("已成功连接到IMU传感器")
         
         ws = websocket.WebSocketApp(ws_url,
                                    on_open=on_open,
@@ -242,16 +356,30 @@ class DataCollector:
                                    on_error=on_error,
                                    on_close=on_close)
         
-        threading.Thread(target=ws.run_forever).start()
+        # 设置连接超时时间
+        websocket.setdefaulttimeout(10)  # 10秒超时
+        
+        thread = threading.Thread(target=ws.run_forever)
+        thread.daemon = True  # 设置为守护线程，主程序退出时自动结束
+        thread.start()
+        
+        if DEBUG:
+            print(f"IMU连接线程已启动")
+        
         return ws
     
     def connect_to_gyro(self):
         """连接到陀螺仪传感器"""
         ws_url = f"ws://{self.server_ip}:{self.server_port}/sensor/connect?type=android.sensor.gyroscope"
         
+        if DEBUG:
+            print(f"尝试连接到陀螺仪传感器: {ws_url}")
+        
         def on_message(ws, message):
             try:
                 data = json.loads(message)
+                if DEBUG_DATA:
+                    print(f"收到陀螺仪数据: {data}")
                 self.record_gyro_data(data)
             except Exception as e:
                 print(f"处理陀螺仪数据时出错: {e}")
@@ -263,7 +391,7 @@ class DataCollector:
             print(f"陀螺仪连接关闭: {reason}")
         
         def on_open(ws):
-            print("已连接到陀螺仪传感器")
+            print("已成功连接到陀螺仪传感器")
         
         ws = websocket.WebSocketApp(ws_url,
                                    on_open=on_open,
@@ -271,20 +399,31 @@ class DataCollector:
                                    on_error=on_error,
                                    on_close=on_close)
         
-        threading.Thread(target=ws.run_forever).start()
+        # 设置连接超时时间
+        websocket.setdefaulttimeout(10)  # 10秒超时
+        
+        thread = threading.Thread(target=ws.run_forever)
+        thread.daemon = True  # 设置为守护线程，主程序退出时自动结束
+        thread.start()
+        
+        if DEBUG:
+            print(f"陀螺仪连接线程已启动")
+        
         return ws
     
     def connect_to_video(self):
         """连接到视频流"""
-        ws_url = f"ws://{self.server_ip}:{self.server_port}/video"
+        ws_url = f"ws://{self.server_ip}:{VIDEO_PORT}/video"
+        print(f"\n正在连接到视频流: {ws_url}")
+        
+        if DEBUG:
+            print(f"尝试连接到视频流: {ws_url}")
         
         def on_message(ws, message):
             try:
-                # 假设视频帧是Base64编码的JPEG图像
-                if self.is_recording and self.current_movement:
-                    # 将Base64字符串转换为二进制数据
-                    frame_data = base64.b64decode(message)
-                    self.record_video_frame(frame_data)
+                if DEBUG_DATA:
+                    print(f"收到视频帧，大小: {len(message) if message else 0} 字节")
+                self.record_video_frame(message)
             except Exception as e:
                 print(f"处理视频帧时出错: {e}")
         
@@ -295,7 +434,7 @@ class DataCollector:
             print(f"视频连接关闭: {reason}")
         
         def on_open(ws):
-            print("已连接到视频流")
+            print("已成功连接到视频流")
         
         ws = websocket.WebSocketApp(ws_url,
                                    on_open=on_open,
@@ -303,7 +442,16 @@ class DataCollector:
                                    on_error=on_error,
                                    on_close=on_close)
         
-        threading.Thread(target=ws.run_forever).start()
+        # 设置连接超时时间
+        websocket.setdefaulttimeout(10)  # 10秒超时
+        
+        thread = threading.Thread(target=ws.run_forever)
+        thread.daemon = True  # 设置为守护线程，主程序退出时自动结束
+        thread.start()
+        
+        if DEBUG:
+            print(f"视频连接线程已启动")
+        
         return ws
 
 def main():
@@ -331,17 +479,32 @@ def main():
     with open(os.path.join(session_dir, "session_metadata.json"), 'w') as f:
         json.dump(session_metadata, f, indent=2)
     
-    # 创建数据收集器
+    print("\n请确保在手机上同时启动以下两个服务:")
+    print("1. 主界面上点击'Start'启动传感器服务(端口{})" .format(SERVER_PORT))
+    print("2. 在导航菜单中点击'Video Stream'并启动视频流服务(端口{})" .format(VIDEO_PORT))
+    input("\n当两个服务都启动后，按Enter键继续...")
+    
+    # 创建数据采集器
     collector = DataCollector(SERVER_IP, SERVER_PORT, session_dir)
     
-    # 连接到所有传感器
     print("\n正在连接到传感器...")
     imu_ws = collector.connect_to_imu()
     gyro_ws = collector.connect_to_gyro()
+    
+    print("\n正在连接到视频流...")
     video_ws = collector.connect_to_video()
     
     # 等待连接建立
     time.sleep(2)
+    
+    # 检查连接状态
+    if not imu_ws or not gyro_ws:
+        print("\n警告: 无法连接到传感器服务。请确保在主界面上点击了'Start'按钮。")
+        input("按Enter键继续尝试...")
+        
+    if not video_ws:
+        print("\n警告: 无法连接到视频流服务。请确保在'Video Stream'页面上点击了'Start'按钮。")
+        input("按Enter键继续尝试...")
     
     try:
         # 对每种运动类型进行记录

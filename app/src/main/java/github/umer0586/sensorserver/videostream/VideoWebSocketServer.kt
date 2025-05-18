@@ -1,11 +1,16 @@
 package github.umer0586.sensorserver.videostream
 
 import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorManager
+import android.net.Uri
 import android.util.Log
 import org.java_websocket.WebSocket
 import org.java_websocket.exceptions.WebsocketNotConnectedException
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
+import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 
@@ -27,6 +32,8 @@ class VideoWebSocketServer(private val context: Context, address: InetSocketAddr
     companion object {
         private val TAG: String = VideoWebSocketServer::class.java.simpleName
         private const val CONNECTION_PATH_VIDEO = "/video"
+        private const val CONNECTION_PATH_IMU = "/sensor/connect?type=android.sensor.accelerometer"
+        private const val CONNECTION_PATH_GYRO = "/sensor/connect?type=android.sensor.gyroscope"
 
         // WebSocket close codes
         const val CLOSE_CODE_UNSUPPORTED_REQUEST = 4002
@@ -39,11 +46,25 @@ class VideoWebSocketServer(private val context: Context, address: InetSocketAddr
 
         val path = handshake.resourceDescriptor.lowercase()
         
-        if (path.startsWith(CONNECTION_PATH_VIDEO)) {
-            // Client is requesting video stream
-            notifyConnectionsChanged()
-        } else {
-            webSocket.close(CLOSE_CODE_UNSUPPORTED_REQUEST, "Unsupported request")
+        when {
+            path.startsWith(CONNECTION_PATH_VIDEO) -> {
+                // Client is requesting video stream
+                webSocket.setAttachment("video")
+                notifyConnectionsChanged()
+            }
+            path.startsWith(CONNECTION_PATH_IMU) -> {
+                // Client is requesting IMU data
+                webSocket.setAttachment("imu")
+                notifyConnectionsChanged()
+            }
+            path.startsWith(CONNECTION_PATH_GYRO) -> {
+                // Client is requesting gyroscope data
+                webSocket.setAttachment("gyro")
+                notifyConnectionsChanged()
+            }
+            else -> {
+                webSocket.close(CLOSE_CODE_UNSUPPORTED_REQUEST, "Unsupported request")
+            }
         }
     }
 
@@ -112,7 +133,74 @@ class VideoWebSocketServer(private val context: Context, address: InetSocketAddr
         
         for (webSocket in connections) {
             try {
-                webSocket.send(buffer)
+                // 只发送给请求视频流的客户端
+                if (webSocket.getAttachment<String>() == "video") {
+                    webSocket.send(buffer)
+                }
+            } catch (e: WebsocketNotConnectedException) {
+                e.printStackTrace()
+            }
+        }
+    }
+    
+    /**
+     * Send IMU data to all connected clients
+     */
+    fun sendIMUData(event: SensorEvent) {
+        if (connections.isEmpty()) {
+            return
+        }
+        
+        val jsonObject = JSONObject()
+        jsonObject.put("accuracy", event.accuracy)
+        jsonObject.put("timestamp", event.timestamp)
+        
+        val valuesArray = JSONObject()
+        for (i in event.values.indices) {
+            valuesArray.put(i.toString(), event.values[i])
+        }
+        jsonObject.put("values", valuesArray)
+        
+        val jsonString = jsonObject.toString()
+        
+        for (webSocket in connections) {
+            try {
+                // 只发送给请求IMU数据的客户端
+                if (webSocket.getAttachment<String>() == "imu") {
+                    webSocket.send(jsonString)
+                }
+            } catch (e: WebsocketNotConnectedException) {
+                e.printStackTrace()
+            }
+        }
+    }
+    
+    /**
+     * Send gyroscope data to all connected clients
+     */
+    fun sendGyroData(event: SensorEvent) {
+        if (connections.isEmpty()) {
+            return
+        }
+        
+        val jsonObject = JSONObject()
+        jsonObject.put("accuracy", event.accuracy)
+        jsonObject.put("timestamp", event.timestamp)
+        
+        val valuesArray = JSONObject()
+        for (i in event.values.indices) {
+            valuesArray.put(i.toString(), event.values[i])
+        }
+        jsonObject.put("values", valuesArray)
+        
+        val jsonString = jsonObject.toString()
+        
+        for (webSocket in connections) {
+            try {
+                // 只发送给请求陀螺仪数据的客户端
+                if (webSocket.getAttachment<String>() == "gyro") {
+                    webSocket.send(jsonString)
+                }
             } catch (e: WebsocketNotConnectedException) {
                 e.printStackTrace()
             }

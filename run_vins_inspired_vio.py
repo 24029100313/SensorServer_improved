@@ -70,56 +70,119 @@ def synchronize_data(imu_data, gyro_data, frames, fps=30):
     return synchronized_data
 
 def process_movement_data(session_dir, movement_type, camera_matrix):
-    """处理特定运动类型的数据并运行VIO"""
+    """处理特定运动类型的数据并运行VIO
+    
+    参数:
+        session_dir: 会话目录
+        movement_type: 运动类型
+        camera_matrix: 相机内参矩阵
+    """
     print(f"处理 {movement_type} 运动数据...")
+    
+    # 记录开始时间
+    start_time = time.time()
     
     # 加载数据
     imu_data, gyro_data, frames = load_data_from_session(session_dir, movement_type)
     
-    if not imu_data or not gyro_data or not frames:
-        print(f"缺少数据，无法处理 {movement_type}")
-        return None
-    
     print(f"加载了 {len(imu_data)} 个IMU数据点, {len(gyro_data)} 个陀螺仪数据点, {len(frames)} 帧视频")
+    print(f"数据加载时间: {time.time() - start_time:.2f}秒")
     
     # 同步数据
-    synchronized_data = synchronize_data(imu_data, gyro_data, frames)
-    print(f"同步后有 {len(synchronized_data)} 个数据点")
+    sync_start_time = time.time()
+    data_points = synchronize_data(imu_data, gyro_data, frames)
+    print(f"同步后有 {len(data_points)} 个数据点")
+    print(f"数据同步时间: {time.time() - sync_start_time:.2f}秒")
+    
+    # 限制处理的数据点数量为25个
+    max_points = 25
+    if len(data_points) > max_points:
+        print(f"限制处理数据点数量为前{max_points}个")
+        data_points = data_points[:max_points]
     
     # 创建VIO系统
     vio = VIOSystem(camera_matrix)
     
-    # 处理数据
-    result_frames = []
+    # 轨迹和可视化结果
     trajectory = []
+    result_frames = []
     
-    for i, data_point in enumerate(synchronized_data):
-        if i % 10 == 0:
-            print(f"处理数据点 {i+1}/{len(synchronized_data)}")
+    # 处理每个数据点
+    process_start_time = time.time()
+    processed_frames = 0
+    
+    for i, data_point in enumerate(data_points):
+        frame_start_time = time.time()
+        print(f"处理数据点 {i+1}/{len(data_points)}")
         
-        # 处理IMU和陀螺仪数据
-        combined_imu = {
-            'acc': data_point['imu']['values'],
-            'gyro': data_point['gyro']['values']
-        }
-        
-        vio.process_imu(combined_imu, data_point['timestamp'])
-        
-        # 处理视频帧
-        result = vio.process_frame(data_point['frame'], data_point['timestamp'])
-        
-        # 可视化
-        vis_frame = vio.visualize_current_frame()
-        if vis_frame is not None:
-            result_frames.append(vis_frame)
-        
-        # 记录轨迹
-        if result['state'] is not None:
-            trajectory.append((
-                result['timestamp'],
-                result['state']['position'],
-                result['state']['rotation']
-            ))
+        try:
+            # 组合IMU和陀螺仪数据
+            combined_imu = {
+                'acc': data_point['imu']['values'],
+                'gyro': data_point['gyro']['values']
+            }
+            
+            # 记录IMU处理时间
+            imu_start_time = time.time()
+            vio.process_imu(combined_imu, data_point['timestamp'])
+            imu_time = time.time() - imu_start_time
+            
+            # 记录帧处理时间
+            frame_process_start = time.time()
+            result = vio.process_frame(data_point['frame'], data_point['timestamp'])
+            frame_process_time = time.time() - frame_process_start
+            
+            # 添加调试信息：检查result的内容
+            print(f"  结果状态: {'有效' if result['state'] is not None else '无效'}")
+            if result['state'] is not None:
+                print(f"  位置: {result['state']['position'].tolist()}")
+                print(f"  旋转: {[round(x, 3) for x in R.from_matrix(result['state']['rotation']).as_euler('xyz', degrees=True).tolist()]}度")
+                print(f"  速度: {result['state']['velocity'].tolist()}")
+            else:
+                print(f"  初始化状态: {vio.initialized}")
+                print(f"  特征点数量: {len(result['features']) if 'features' in result else 0}")
+            
+            # 记录可视化时间
+            vis_start_time = time.time()
+            vis_frame = vio.visualize_current_frame()
+            vis_time = time.time() - vis_start_time
+            
+            if vis_frame is not None:
+                result_frames.append(vis_frame)
+            
+            # 记录轨迹
+            if result['state'] is not None:
+                trajectory.append((
+                    result['timestamp'],
+                    result['state']['position'],
+                    result['state']['rotation']
+                ))
+                print(f"  已添加轨迹点，当前轨迹长度: {len(trajectory)}")
+            else:
+                print(f"  未添加轨迹点，当前轨迹长度: {len(trajectory)}")
+            
+            processed_frames += 1
+            
+            # 每10帧输出一次性能统计
+            if i % 10 == 0 and i > 0:
+                frame_time = time.time() - frame_start_time
+                print(f"  性能统计 [帧 {i}]:")  
+                print(f"  - IMU处理时间: {imu_time:.4f}秒")  
+                print(f"  - 帧处理时间: {frame_process_time:.4f}秒")  
+                print(f"  - 可视化时间: {vis_time:.4f}秒")  
+                print(f"  - 总帧处理时间: {frame_time:.4f}秒")  
+                print(f"  - 平均每帧时间: {(time.time() - process_start_time) / processed_frames:.4f}秒")  
+                
+        except Exception as e:
+            print(f"处理数据点 {i+1} 时出错: {e}")
+            # 继续处理下一个数据点
+            continue
+    
+    # 计算总处理时间
+    total_process_time = time.time() - process_start_time
+    print(f"总处理时间: {total_process_time:.2f}秒")
+    if processed_frames > 0:
+        print(f"平均每帧处理时间: {total_process_time / processed_frames:.4f}秒")
     
     # 保存结果
     results_dir = os.path.join(session_dir, movement_type, "vio_results")
@@ -127,6 +190,18 @@ def process_movement_data(session_dir, movement_type, camera_matrix):
     
     # 保存轨迹
     trajectory_file = os.path.join(results_dir, "trajectory.json")
+    print(f"\n轨迹信息:")
+    print(f"  轨迹点数量: {len(trajectory)}")
+    if len(trajectory) > 0:
+        print(f"  第一个点: 时间戳={trajectory[0][0]}, 位置={trajectory[0][1].tolist()}")
+        print(f"  最后一个点: 时间戳={trajectory[-1][0]}, 位置={trajectory[-1][1].tolist()}")
+    else:
+        print("  轨迹为空，检查以下可能原因:")
+        print("  1. 系统未能成功初始化")
+        print("  2. 处理数据点时出现错误")
+        print("  3. IMU或视觉数据质量问题")
+        print("  4. 特征点数量不足")
+    
     with open(trajectory_file, 'w') as f:
         json.dump([{
             'timestamp': float(t),
@@ -173,6 +248,7 @@ def main():
     """主函数"""
     print("===== VINS-Inspired VIO系统 =====")
     print("此程序将处理收集的数据并运行视觉惯性里程计算法")
+    print("注意: 每种运动类型只处理前25个数据点")
     
     # 相机内参矩阵 (需要根据实际相机进行标定)
     # 这里使用一个估计值，实际应用中应该进行相机标定
@@ -198,8 +274,9 @@ def main():
     print(f"使用最新的数据会话: {latest_session}")
     
     # 获取所有运动类型
+    valid_movement_types = ["x_positive_negative", "x_rotation", "y_positive_negative", "y_rotation", "z_positive_negative", "z_rotation"]
     movement_types = [d for d in os.listdir(latest_session) 
-                     if os.path.isdir(os.path.join(latest_session, d)) and not d.startswith(".")]
+                     if os.path.isdir(os.path.join(latest_session, d)) and d in valid_movement_types]
     
     if not movement_types:
         print(f"错误: 在 {latest_session} 中找不到运动数据")

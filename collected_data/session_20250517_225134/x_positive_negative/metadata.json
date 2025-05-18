@@ -1,0 +1,10 @@
+{
+  "movement_type": "x_positive_negative",
+  "description": "\u8bf7\u6cbf\u7740\u624b\u673aX\u8f74\u65b9\u5411\uff08\u5de6\u53f3\uff09\u6765\u56de\u79fb\u52a8\u624b\u673a",
+  "created_at": "2025-05-17T22:51:38.749918",
+  "completed_at": "2025-05-17T22:51:46.756637",
+  "imu_samples": 50,
+  "gyro_samples": 50,
+  "video_frames": 80,
+  "duration_seconds": 8.01732611656189
+}

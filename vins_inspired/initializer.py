@@ -1,6 +1,66 @@
 import numpy as np
 import cv2
 from scipy.spatial.transform import Rotation as R
+import numba
+
+# 使用Numba加速的独立函数
+@numba.jit(nopython=True)
+def compute_reprojection_error(point_3d, point_2d, P):
+    """
+    计算重投影误差
+    
+    参数:
+        point_3d: 3D点
+        point_2d: 2D点
+        P: 投影矩阵
+        
+    返回:
+        重投影误差
+    """
+    # 投影3D点到图像平面
+    point_3d_h = np.append(point_3d, 1.0)
+    point_proj = P @ point_3d_h
+    point_proj = point_proj[:2] / point_proj[2]
+    
+    # 计算误差
+    error = np.linalg.norm(point_2d - point_proj)
+    return error
+
+@numba.jit(nopython=True)
+def filter_triangulated_points(points_3d, pts1, pts2, P1, P2, max_error=10.0, min_depth=0.01):
+    """
+    过滤三角化点
+    
+    参数:
+        points_3d: 三角化得到的3D点
+        pts1: 第一帧中的特征点
+        pts2: 第二帧中的特征点
+        P1: 第一个相机的投影矩阵
+        P2: 第二个相机的投影矩阵
+        max_error: 最大重投影误差
+        min_depth: 最小深度
+        
+    返回:
+        有效的3D点和对应的索引
+    """
+    valid_points = []
+    valid_indices = []
+    
+    for i in range(len(points_3d)):
+        pt = points_3d[i]
+        
+        # 检查点是否在相机前方
+        if pt[2] > min_depth:
+            # 计算重投影误差
+            err1 = compute_reprojection_error(pt, pts1[i], P1)
+            err2 = compute_reprojection_error(pt, pts2[i], P2)
+            
+            # 检查重投影误差
+            if err1 < max_error and err2 < max_error:
+                valid_points.append(pt)
+                valid_indices.append(i)
+    
+    return np.array(valid_points), np.array(valid_indices)
 
 class VIOInitializer:
     """
@@ -9,26 +69,23 @@ class VIOInitializer:
     类似于VINS-Mono中的initial/initial_ex_rotation.h和initial_sfm.h
     """
     
-    def __init__(self, camera_matrix, acc_noise=0.01, gyro_noise=0.001):
+    def __init__(self, camera_matrix, min_frames=3, min_features=15):
         """
         初始化VIO初始化器
         
         参数:
             camera_matrix: 相机内参矩阵
-            acc_noise: 加速度计噪声标准差
-            gyro_noise: 陀螺仪噪声标准差
+            min_frames: 初始化所需的最小帧数
+            min_features: 初始化所需的最小特征点数量
         """
         self.K = camera_matrix
-        self.acc_noise = acc_noise
-        self.gyro_noise = gyro_noise
+        
+        # 初始化所需的最小帧数和特征点数量
+        self.min_frames = 2  # 降低为2帧
+        self.min_features = 8  # 降低为8个特征点
         
         # 初始化状态
         self.initialized = False
-        
-        # 初始化参数
-        self.min_parallax = 10  # 最小视差 (像素)
-        self.min_tracked_points = 20  # 最小跟踪点数
-        self.min_frames = 5  # 初始化所需的最小帧数
         
         # 存储初始化过程中的帧
         self.init_frames = []
@@ -72,7 +129,7 @@ class VIOInitializer:
             return False
         
         # 检查是否有足够的视差和跟踪点
-        if not self._check_motion():
+        if not self._check_initialization_conditions():
             # 如果运动不足，移除最旧的帧
             if len(self.init_frames) > self.min_frames * 2:
                 self.init_frames.pop(0)
@@ -86,15 +143,36 @@ class VIOInitializer:
         
         return success
     
-    def _check_motion(self):
+    def _check_initialization_conditions(self):
         """
-        检查是否有足够的运动用于初始化
+        检查是否满足初始化条件
         
         返回:
-            是否有足够的运动
+            满足条件返回True，否则返回False
+        """
+        # 检查帧数是否足够
+        if len(self.init_frames) < self.min_frames:
+            print(f"初始化条件检查: 帧数不足 ({len(self.init_frames)}/{self.min_frames})")
+            return False
+        
+        # 检查特征点数量是否足够
+        common_features = self._find_common_features()
+        if len(common_features) < self.min_features:
+            print(f"初始化条件检查: 共同特征点不足 ({len(common_features)}/{self.min_features})")
+            return False
+        
+        print(f"初始化条件检查: 通过 (帧数: {len(self.init_frames)}, 共同特征点: {len(common_features)})")
+        return True
+    
+    def _find_common_features(self):
+        """
+        找到两帧中共同的特征点
+        
+        返回:
+            共同特征点列表
         """
         if len(self.init_frames) < 2:
-            return False
+            return []
         
         # 获取第一帧和最后一帧
         first_frame = self.init_frames[0]
@@ -109,20 +187,7 @@ class VIOInitializer:
                     np.array(last_frame['features'][feat_id][:2])  # 最后一帧中的位置
                 )
         
-        # 检查共同特征点数量
-        if len(common_features) < self.min_tracked_points:
-            return False
-        
-        # 计算平均视差
-        total_parallax = 0
-        for _, (pos1, pos2) in common_features.items():
-            parallax = np.linalg.norm(pos1 - pos2)
-            total_parallax += parallax
-        
-        avg_parallax = total_parallax / len(common_features)
-        
-        # 检查平均视差是否足够大
-        return avg_parallax >= self.min_parallax
+        return common_features
     
     def _initialize(self):
         """
@@ -180,7 +245,7 @@ class VIOInitializer:
             if len(track) >= 3:  # 至少在3帧中出现
                 good_tracks[feat_id] = track
         
-        if len(good_tracks) < self.min_tracked_points:
+        if len(good_tracks) < self.min_features:
             return False, None, None, None
         
         # 选择两帧进行初始化
@@ -278,6 +343,53 @@ class VIOInitializer:
         
         return True, R_list, t_list, points_3d
     
+    def _triangulate_features(self, P1, P2, pts1, pts2):
+        """
+        三角化特征点
+        
+        参数:
+            P1: 第一个相机的投影矩阵
+            P2: 第二个相机的投影矩阵
+            pts1: 第一帧中的特征点
+            pts2: 第二帧中的特征点
+            
+        返回:
+            三角化后的3D点
+        """
+        # 转换为numpy数组以提高性能
+        pts1_np = np.array([pt[0] for pt in pts1], dtype=np.float32)
+        pts2_np = np.array([pt[0] for pt in pts2], dtype=np.float32)
+        
+        # 归一化坐标
+        pts1_n = cv2.undistortPoints(pts1, self.K, None)
+        pts2_n = cv2.undistortPoints(pts2, self.K, None)
+        
+        # 提取点坐标
+        pts1_n_flat = pts1_n.reshape(-1, 2).T
+        pts2_n_flat = pts2_n.reshape(-1, 2).T
+        
+        # 三角化
+        points_4d = cv2.triangulatePoints(P1, P2, pts1_n_flat, pts2_n_flat)
+        
+        # 转换为3D点
+        points_3d_h = points_4d.T
+        points_3d = points_3d_h[:, :3] / points_3d_h[:, 3:4]
+        
+        # 使用Numba加速的函数过滤点
+        valid_points, valid_indices = filter_triangulated_points(
+            points_3d, pts1_np, pts2_np, P1, P2, 10.0, 0.01
+        )
+        
+        if len(valid_points) > 0:
+            print(f"三角化: 有效点数量 {len(valid_points)}/{len(points_3d)}")
+        else:
+            print(f"三角化: 没有有效点")
+        
+        # 重新格式化为原始格式
+        valid_points_reshaped = np.array([[[x, y, z]] for x, y, z in valid_points])
+        
+        return valid_points_reshaped, valid_indices.tolist()
+    
     def _align_visual_imu(self, R_list, t_list):
         """
         对齐视觉SFM结果与IMU预积分结果
@@ -319,7 +431,28 @@ class VIOInitializer:
                 curr_data = imu_data[j]
                 
                 dt = curr_data['timestamp'] - prev_data['timestamp']
-                gyro = np.array(curr_data['gyro']) - self.init_gyro_bias
+                # 获取陈螺仪数据
+                gyro_data = curr_data['gyro']
+                
+                # 处理不同格式的陈螺仪数据
+                if isinstance(gyro_data, dict):
+                    if 'values' in gyro_data:
+                        # 从字典的values字段中提取值
+                        gyro_values = [float(gyro_data['values'].get(str(i), 0.0)) for i in range(3)]
+                        gyro = np.array(gyro_values) - self.init_gyro_bias
+                    elif all(str(i) in gyro_data for i in range(3)):
+                        # 如果字典直接包含0,1,2索引
+                        gyro_values = [float(gyro_data.get(str(i), 0.0)) for i in range(3)]
+                        gyro = np.array(gyro_values) - self.init_gyro_bias
+                    else:
+                        # 如果是vio_system处理过的格式，直接使用
+                        gyro = np.array(gyro_data) - self.init_gyro_bias
+                elif isinstance(gyro_data, (list, np.ndarray)):
+                    # 如果是数组，直接使用
+                    gyro = np.array(gyro_data) - self.init_gyro_bias
+                else:
+                    # 如果是其他类型，尝试转换为数组
+                    gyro = np.array([0.0, 0.0, 0.0])  # 默认值
                 
                 # 简单积分
                 angle = np.linalg.norm(gyro) * dt
@@ -375,7 +508,26 @@ class VIOInitializer:
         gravity_samples = []
         for frame in self.init_frames[:3]:  # 使用前几帧
             for imu_data in frame['imu_data']:
-                gravity_samples.append(np.array(imu_data['acc']))
+                # 正确处理加速度计数据
+                acc_data = imu_data['acc']
+                if isinstance(acc_data, dict):
+                    if 'values' in acc_data:
+                        # 从字典的values字段中提取值
+                        acc_values = [float(acc_data['values'].get(str(i), 0.0)) for i in range(3)]
+                        gravity_samples.append(np.array(acc_values))
+                    elif all(str(i) in acc_data for i in range(3)):
+                        # 如果字典直接包含0,1,2索引
+                        acc_values = [float(acc_data.get(str(i), 0.0)) for i in range(3)]
+                        gravity_samples.append(np.array(acc_values))
+                    else:
+                        # 如果是vio_system处理过的格式，直接使用
+                        gravity_samples.append(np.array(acc_data))
+                elif isinstance(acc_data, (list, np.ndarray)):
+                    # 如果是数组，直接使用
+                    gravity_samples.append(np.array(acc_data))
+                else:
+                    # 如果是其他类型，尝试转换为数组
+                    gravity_samples.append(np.array([0.0, 0.0, 0.0]))  # 默认值
         
         if len(gravity_samples) < 10:
             return False
@@ -419,7 +571,29 @@ class VIOInitializer:
             # 简化计算，假设加速度恒定
             acc_samples = []
             for data in imu_data:
-                acc = np.array(data['acc']) - self.gravity  # 减去重力
+                # 正确处理加速度计数据
+                acc_data = data['acc']
+                
+                # 处理不同格式的加速度计数据
+                if isinstance(acc_data, dict):
+                    if 'values' in acc_data:
+                        # 从字典的values字段中提取值
+                        acc_values = [float(acc_data['values'].get(str(i), 0.0)) for i in range(3)]
+                        acc = np.array(acc_values) - self.gravity  # 减去重力
+                    elif all(str(i) in acc_data for i in range(3)):
+                        # 如果字典直接包含0,1,2索引
+                        acc_values = [float(acc_data.get(str(i), 0.0)) for i in range(3)]
+                        acc = np.array(acc_values) - self.gravity  # 减去重力
+                    else:
+                        # 如果是vio_system处理过的格式，直接使用
+                        acc = np.array(acc_data) - self.gravity  # 减去重力
+                elif isinstance(acc_data, (list, np.ndarray)):
+                    # 如果是数组，直接使用
+                    acc = np.array(acc_data) - self.gravity  # 减去重力
+                else:
+                    # 如果是其他类型，尝试转换为数组
+                    acc = np.array([0.0, 0.0, 0.0])  # 默认值
+                
                 acc_samples.append(acc)
             
             mean_acc = np.mean(acc_samples, axis=0)

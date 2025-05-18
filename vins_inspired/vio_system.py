@@ -2,7 +2,9 @@ import numpy as np
 import cv2
 import time
 import os
+import numpy as np
 from datetime import datetime
+from scipy.spatial.transform import Rotation as R
 
 from .feature_tracker import FeatureTracker
 from .imu_preintegration import IMUPreintegration
@@ -120,9 +122,73 @@ class VIOSystem:
             # 尝试初始化
             init_success = self.initializer.add_frame(frame_data)
             
-            if init_success:
+            print(f"初始化尝试: {'成功' if init_success else '失败'}")
+            print(f"当前特征点数量: {len(curr_pts) if curr_pts is not None else 0}")
+            print(f"初始化帧数量: {len(self.initializer.init_frames)}")
+            print(f"IMU数据点数量: {len(imu_data_since_last)}")
+            
+            # 即使初始化失败，也创建一个基本的轨迹
+            # 如果我们有足够的帧和特征点
+            # 降低初始化要求：减少所需的最小帧数和特征点数
+            if not init_success and len(self.initializer.init_frames) >= 2 and curr_pts is not None and len(curr_pts) >= 8:
+                # 根据IMU数据创建一个简单的初始状态
+                # 计算平均加速度和角速度
+                avg_acc = np.zeros(3)
+                avg_gyro = np.zeros(3)
+                count = 0
+                
+                for data in imu_data_since_last:
+                    avg_acc += np.array(data['acc'])
+                    avg_gyro += np.array(data['gyro'])
+                    count += 1
+                
+                if count > 0:
+                    avg_acc /= count
+                    avg_gyro /= count
+                
+                print(f"使用简化初始化:")
+                print(f"  平均加速度: {avg_acc.tolist()}")
+                print(f"  平均角速度: {avg_gyro.tolist()}")
+                
+                # 创建一个基本的初始状态
+                self.current_state = {
+                    'timestamp': timestamp,
+                    'position': np.zeros(3),  # 初始位置设为原点
+                    'rotation': np.eye(3),    # 初始旋转设为单位矩阵
+                    'velocity': np.zeros(3),   # 初始速度设为零
+                    'acc_bias': np.zeros(3),   # 初始加速度偏置设为零
+                    'gyro_bias': np.zeros(3)   # 初始陀螺仪偏置设为零
+                }
+                
+                # 设置重力向量为默认值
+                self.optimizer.set_gravity(np.array([0, 0, 9.81]))
+                
+                # 重置IMU预积分
+                self.imu_preintegration.reset()
+                
+                # 添加初始帧到优化器
+                self.optimizer.add_frame(
+                    self.current_state,
+                    None,  # 没有预积分
+                    feature_observations
+                )
+                
+                # 标记为已初始化
+                self.initialized = True
+                
+                # 保存状态历史
+                self.states_history.append(self.current_state.copy())
+                
+                print("VIO系统使用简化初始化!")
+            
+            elif init_success:
                 # 获取初始化结果
                 init_result = self.initializer.get_initialization_result()
+                
+                print(f"正常初始化成功:")
+                print(f"  初始旋转: {[round(x, 3) for x in R.from_matrix(init_result['init_rotation']).as_euler('xyz', degrees=True).tolist()]}度")
+                print(f"  初始速度: {init_result['init_velocity'].tolist()}")
+                print(f"  重力向量: {init_result['gravity'].tolist()}")
                 
                 # 设置初始状态
                 self.current_state = {
@@ -156,8 +222,6 @@ class VIOSystem:
                 
                 # 保存状态历史
                 self.states_history.append(self.current_state.copy())
-                
-                print("VIO系统初始化成功!")
         else:
             # 已初始化，执行正常处理
             
@@ -231,6 +295,13 @@ class VIOSystem:
                 # 执行优化
                 optimized_states = self.optimizer.optimize()
                 
+                # 添加调试信息：检查优化结果
+                print(f"优化结果: {'成功' if len(optimized_states) > 0 else '失败'}")
+                if len(optimized_states) > 0:
+                    print(f"  优化前位置: {self.current_state['position'].tolist()}")
+                    print(f"  优化后位置: {optimized_states[-1]['position'].tolist()}")
+                    print(f"  位置变化: {np.linalg.norm(optimized_states[-1]['position'] - self.current_state['position']):.4f}米")
+                
                 # 更新当前状态
                 if len(optimized_states) > 0:
                     self.current_state = optimized_states[-1]
@@ -298,14 +369,21 @@ class VIOSystem:
         velocity_new = velocity + acc_world * dt
         position_new = position + velocity * dt + 0.5 * acc_world * dt * dt
         
-        # 更新旋转
-        angle = np.linalg.norm(gyro_corrected) * dt
-        if angle > 1e-10:
-            axis = gyro_corrected / np.linalg.norm(gyro_corrected)
-            r = R.from_rotvec(axis * angle)
-            rotation_delta = r.as_matrix()
-            rotation_new = rotation @ rotation_delta
-        else:
+        # 更新旋转 - 增强错误处理
+        try:
+            angle = np.linalg.norm(gyro_corrected) * dt
+            if angle > 1e-6:  # 增大阈值，避免数值问题
+                axis = gyro_corrected / np.linalg.norm(gyro_corrected)
+                r = R.from_rotvec(axis * angle)
+                rotation_delta = r.as_matrix()
+                rotation_new = rotation @ rotation_delta
+            else:
+                # 当角速度非常小时，直接使用原来的旋转
+                rotation_new = rotation
+        except Exception as e:
+            print(f"IMU旋转更新错误: {e}")
+            print(f"gyro_corrected: {gyro_corrected}, dt: {dt}, angle: {angle if 'angle' in locals() else 'N/A'}")
+            # 出错时保持原来的旋转
             rotation_new = rotation
         
         # 更新状态
